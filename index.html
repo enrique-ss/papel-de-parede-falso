@@ -3,41 +3,23 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Wallpapers Animados</title>
+  <title>Wallpaper Animado</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  
-  <video id="videoBackground" autoplay loop muted playsinline class="active">
-    <source id="videoSource" src="video10.mp4" type="video/mp4">
-  </video>
+  <video id="videoBackground1" autoplay loop muted playsinline></video>
+  <video id="videoBackground2" autoplay loop muted playsinline></video>
 
   <div id="menu">
-    <h1>SELECIONE UM WALLPAPER</h1>
     <div class="wallpaper-grid" id="wallpaperGrid">
-      
-      <button class="wallpaper-btn add-video-btn" id="btnAddVideo">
-        <div class="add-icon-container">
-          <svg viewBox="0 0 24 24" width="40" height="40" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
-            <line x1="12" y1="5" x2="12" y2="19"></line>
-            <line x1="5" y1="12" x2="19" y2="12"></line>
-          </svg>
-        </div>
-        <span class="video-label">Adicionar Vídeo</span>
+      <button class="wallpaper-btn add-btn" id="btnAddVideo" title="Adicionar Vídeo">
+        <svg viewBox="0 0 24 24" width="48" height="48" stroke="currentColor" stroke-width="2" fill="none">
+          <line x1="12" y1="5" x2="12" y2="19"></line>
+          <line x1="5" y1="12" x2="19" y2="12"></line>
+        </svg>
       </button>
-      
       <input type="file" id="videoInput" accept="video/mp4,video/webm,video/mkv" style="display: none;">
-      
     </div>
-  </div>
-
-  <div class="loading" id="loading">
-    <div class="spinner"></div>
-    <div>Carregando vídeo...</div>
-  </div>
-
-  <div id="controls">
-    <button class="control-btn" onclick="goBack()">← Voltar</button>
   </div>
 
   <script src="script.js"></script>

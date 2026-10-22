@@ -1,198 +1,240 @@
-const video = document.getElementById('videoBackground');
-const videoSource = document.getElementById('videoSource');
-const menu = document.getElementById('menu');
-const controls = document.getElementById('controls');
-const loading = document.getElementById('loading');
-const wallpaperBtnsContainer = document.getElementById('wallpaperGrid');
+(() => {
+  'use strict';
 
-// Lista de vídeos (aceita MP4, WebM, etc)
-const videoFiles = [
+  const video1 = document.getElementById('videoBackground1');
+  const video2 = document.getElementById('videoBackground2');
+  const menu = document.getElementById('menu');
+  const wallpaperGrid = document.getElementById('wallpaperGrid');
+  const btnAdd = document.getElementById('btnAddVideo');
+  const inputVideo = document.getElementById('videoInput');
+
+  // Lista dos vídeos locais
+  const videoFiles = [
     'video2', 'video3', 'video4', 'video5', 'video6', 'video7',
     'video8', 'video9', 'video10', 'video11', 'video12', 'video13',
     'video14', 'video15', 'video16', 'video17', 'video18'
-];
+  ];
 
-// Formatos suportados em ordem de preferência (melhor compressão primeiro)
-const videoFormats = ['.webm', '.mp4'];
+  let monitor2Window = null;
 
-// Detecta qual formato existe para cada vídeo
-async function detectVideoFormat(basename) {
-    for (const format of videoFormats) {
-        const url = basename + format;
-        try {
-            const response = await fetch(url, { method: 'HEAD' });
-            if (response.ok) {
-                return url;
-            }
-        } catch (e) {
-            continue;
-        }
-    }
-    return basename + '.mp4'; // Fallback para MP4
-}
+  // Gerador em fila de frames reais do vídeo via Canvas (armazenado em cache IndexedDB / Memory)
+  const thumbCache = {};
+  const queue = [];
+  let isExtracting = false;
 
-// Função para gerar thumbnail JPEG do vídeo
-function generateThumbnail(videoSrc, callback) {
+  // Inicializa IndexedDB para carregar as thumbs reais instantaneamente nas próximas aberturas
+  let dbPromise = new Promise((resolve) => {
+    const request = indexedDB.open('WallpaperThumbCache', 1);
+    request.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains('thumbs')) {
+        db.createObjectStore('thumbs');
+      }
+    };
+    request.onsuccess = (e) => resolve(e.target.result);
+    request.onerror = () => resolve(null);
+  });
+
+  async function getCachedThumb(key) {
+    if (thumbCache[key]) return thumbCache[key];
+    const db = await dbPromise;
+    if (!db) return null;
+    return new Promise((resolve) => {
+      const tx = db.transaction('thumbs', 'readonly');
+      const store = tx.objectStore('thumbs');
+      const req = store.get(key);
+      req.onsuccess = () => {
+        if (req.result) thumbCache[key] = req.result;
+        resolve(req.result);
+      };
+      req.onerror = () => resolve(null);
+    });
+  }
+
+  async function saveCachedThumb(key, dataUrl) {
+    thumbCache[key] = dataUrl;
+    const db = await dbPromise;
+    if (!db) return;
+    const tx = db.transaction('thumbs', 'readwrite');
+    const store = tx.objectStore('thumbs');
+    store.put(dataUrl, key);
+  }
+
+  // Extração real sequencial (1 por 1) para não engasgar CPU/rede
+  function processQueue() {
+    if (isExtracting || queue.length === 0) return;
+    isExtracting = true;
+    const item = queue.shift();
+
     const tempVideo = document.createElement('video');
     tempVideo.preload = 'metadata';
     tempVideo.muted = true;
     tempVideo.playsInline = true;
-    
-    tempVideo.addEventListener('loadeddata', function() {
-        tempVideo.currentTime = 1; // Pega frame em 1 segundo
-    });
-    
-    tempVideo.addEventListener('seeked', function() {
+    tempVideo.src = item.url;
+
+    let timeout = setTimeout(() => {
+      cleanup();
+      processQueue();
+    }, 4000);
+
+    function cleanup() {
+      clearTimeout(timeout);
+      tempVideo.onloadeddata = null;
+      tempVideo.onseeked = null;
+      tempVideo.onerror = null;
+      tempVideo.removeAttribute('src');
+      tempVideo.load();
+      isExtracting = false;
+    }
+
+    tempVideo.onloadeddata = () => {
+      // Captura no segundo 1 para evitar tela preta de fade-in
+      tempVideo.currentTime = Math.min(1.0, (tempVideo.duration || 2) / 2);
+    };
+
+    tempVideo.onseeked = () => {
+      try {
         const canvas = document.createElement('canvas');
-        canvas.width = 480;
-        canvas.height = 270;
-        
+        canvas.width = 320;
+        canvas.height = 180;
         const ctx = canvas.getContext('2d');
         ctx.drawImage(tempVideo, 0, 0, canvas.width, canvas.height);
-        
-        // Converte para JPEG com qualidade 70%
-        const thumbnailUrl = canvas.toDataURL('image/jpeg', 0.7);
-        
-        // Libera memória
-        tempVideo.src = '';
-        tempVideo.load();
-        
-        callback(thumbnailUrl);
-    });
-    
-    tempVideo.addEventListener('error', function() {
-        callback(null);
-    });
-    
-    tempVideo.src = videoSrc;
-}
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+        saveCachedThumb(item.key, dataUrl);
+        item.imgEl.src = dataUrl;
+      } catch (e) {
+        console.warn('Erro ao gerar frame:', e);
+      }
+      cleanup();
+      processQueue();
+    };
 
-// Cria os botões de vídeo com thumbnails
-async function createVideoButtons() {
-    for (let index = 0; index < videoFiles.length; index++) {
-        const basename = videoFiles[index];
-        
-        const btn = document.createElement('button');
-        btn.classList.add('wallpaper-btn');
-        
-        // Placeholder de loading
-        const loadingText = document.createElement('div');
-        loadingText.classList.add('thumbnail-loading');
-        loadingText.textContent = '...';
-        
-        // Label do vídeo
-        const label = document.createElement('span');
-        label.classList.add('video-label');
-        label.textContent = basename.replace('video', 'Wallpaper ');
-        
-        btn.appendChild(loadingText);
-        btn.appendChild(label);
-        wallpaperBtnsContainer.appendChild(btn);
-        
-        // Detecta formato e define
-        const videoPath = await detectVideoFormat(basename);
-        btn.setAttribute('data-video', videoPath);
-        
-        // Gera thumbnail com delay para não travar o navegador
-        setTimeout(() => {
-            generateThumbnail(videoPath, (thumbnailUrl) => {
-                if (thumbnailUrl) {
-                    const img = document.createElement('img');
-                    img.classList.add('thumbnail');
-                    img.src = thumbnailUrl;
-                    btn.insertBefore(img, btn.firstChild);
-                }
-                loadingText.remove();
-            });
-        }, index * 200); // Delay de 200ms entre cada thumbnail
-        
-        // Evento de clique
-        btn.addEventListener('click', function() {
-            const videoFile = this.getAttribute('data-video');
-            if (videoFile) loadVideo(videoFile);
-        });
+    tempVideo.onerror = () => {
+      cleanup();
+      processQueue();
+    };
+  }
+
+  async function loadRealThumbnail(videoUrl, key, imgEl) {
+    const cached = await getCachedThumb(key);
+    if (cached) {
+      imgEl.src = cached;
+      return;
     }
-}
+    // Coloca na fila de extração em segundo plano
+    queue.push({ url: videoUrl, key, imgEl });
+    processQueue();
+  }
 
-// Inicializa ao carregar a página
-document.addEventListener('DOMContentLoaded', createVideoButtons);
-
-// Botão "Adicionar Vídeo"
-const btnAdd = document.getElementById('btnAddVideo');
-const inputVideo = document.getElementById('videoInput');
-
-if (btnAdd && inputVideo) {
-    btnAdd.addEventListener('click', () => inputVideo.click());
-
-    inputVideo.addEventListener('change', (e) => {
-        const file = e.target.files[0];
-        if (file) {
-            const fileURL = URL.createObjectURL(file);
-            loadVideo(fileURL);
-            inputVideo.value = ''; 
-        }
-    });
-}
-
-// Carrega o vídeo selecionado
-function loadVideo(filename) {
-    loading.classList.add('active');
-    menu.classList.add('hidden');
-
-    video.pause();
-    video.classList.remove('active');
-
-    videoSource.src = filename;
-    video.load();
-
-    video.addEventListener('loadeddata', function onLoad() {
-        video.removeEventListener('loadeddata', onLoad);
-        loading.classList.remove('active');
-        video.classList.add('active');
-        video.play();
-        controls.classList.add('visible');
-        enterFullscreen();
-    });
-
-    video.addEventListener('error', function onError() {
-        video.removeEventListener('error', onError);
-        loading.classList.remove('active');
-        alert('Erro ao carregar o vídeo. Verifique se o arquivo existe e o formato é compatível (mp4/webm).');
-        menu.classList.remove('hidden');
-    });
-}
-
-// Volta ao menu
-function goBack() {
-    if (document.fullscreenElement) {
-        document.exitFullscreen().then(() => showMenu()).catch(() => showMenu());
+  // Reprodução nos monitores
+  function playOnMonitor(videoUrl, monitor = 1) {
+    if (monitor === 1) {
+      video1.src = videoUrl;
+      video1.classList.add('active');
+      video1.play().catch(() => {});
     } else {
-        showMenu();
+      // Monitor 2: abre ou comanda popup na segunda tela
+      if (!monitor2Window || monitor2Window.closed) {
+        const left = window.screen.width || 1920;
+        monitor2Window = window.open('', 'WallpaperMonitor2', `left=${left},top=0,width=1920,height=1080,fullscreen=yes,menubar=no,toolbar=no,location=no,status=no`);
+        if (monitor2Window) {
+          monitor2Window.document.write(`
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <title>Monitor 2</title>
+              <style>
+                * { margin:0; padding:0; overflow:hidden; background:#000; }
+                video { width:100vw; height:100vh; object-fit:cover; }
+              </style>
+            </head>
+            <body>
+              <video id="v2" autoplay loop muted playsinline src="${videoUrl}"></video>
+            </body>
+            </html>
+          `);
+          monitor2Window.document.close();
+        } else {
+          // Se bloqueado popups, toca no segundo elemento interno
+          video2.src = videoUrl;
+          video2.classList.add('active');
+          video2.play().catch(() => {});
+        }
+      } else {
+        const v2 = monitor2Window.document.getElementById('v2');
+        if (v2) {
+          v2.src = videoUrl;
+          v2.play().catch(() => {});
+        }
+      }
     }
-}
 
-// Mostra o menu
-function showMenu() {
-    menu.classList.remove('hidden');
-    video.classList.remove('active');
-    video.pause();
-    controls.classList.remove('visible');
-}
+    // Oculta completamente o menu sem deixar NENHUM hub ou botão
+    menu.classList.add('hidden');
+  }
 
-// Entra em tela cheia
-function enterFullscreen() {
-    if (!document.fullscreenElement) {
-        document.documentElement.requestFullscreen().catch(err => {
-            console.log('Não foi possível entrar em tela cheia automaticamente:', err.message);
-        });
-    }
-}
+  // Montagem da grid
+  function buildGrid() {
+    videoFiles.forEach((name) => {
+      const url = `${name}.mp4`;
+      const btn = document.createElement('button');
+      btn.className = 'wallpaper-btn';
 
-// Atalhos de teclado (Escape ou M)
-document.addEventListener('keydown', function(e) {
-    const key = e.key.toLowerCase();
-    if (key === 'escape' || key === 'm') {
+      const img = document.createElement('img');
+      img.alt = '';
+      btn.appendChild(img);
+
+      loadRealThumbnail(url, name, img);
+
+      // Clique esquerdo: Monitor 1
+      btn.addEventListener('click', () => {
+        playOnMonitor(url, 1);
+      });
+
+      // Clique direito: Monitor 2
+      btn.addEventListener('contextmenu', (e) => {
         e.preventDefault();
-        if (menu.classList.contains('hidden')) goBack();
+        playOnMonitor(url, 2);
+      });
+
+      wallpaperGrid.appendChild(btn);
+    });
+  }
+
+  // Importar vídeo local
+  btnAdd.addEventListener('click', () => inputVideo.click());
+  inputVideo.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+
+    const btn = document.createElement('button');
+    btn.className = 'wallpaper-btn';
+    const img = document.createElement('img');
+    btn.appendChild(img);
+
+    const customKey = `local_${file.name}_${file.size}`;
+    loadRealThumbnail(url, customKey, img);
+
+    btn.addEventListener('click', () => playOnMonitor(url, 1));
+    btn.addEventListener('contextmenu', (ev) => {
+      ev.preventDefault();
+      playOnMonitor(url, 2);
+    });
+
+    btnAdd.insertAdjacentElement('afterend', btn);
+    playOnMonitor(url, 1);
+    inputVideo.value = '';
+  });
+
+  // Atalho: tecla ESC para alternar o menu
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' || e.key.toLowerCase() === 'm') {
+      e.preventDefault();
+      menu.classList.toggle('hidden');
     }
-});
+  });
+
+  // Iniciar
+  buildGrid();
+})();
