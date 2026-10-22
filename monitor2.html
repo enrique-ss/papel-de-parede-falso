@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Wallpaper Animado - Monitor 2</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    html, body {
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      background: #000;
+    }
+    video {
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
+      object-fit: cover;
+    }
+  </style>
+</head>
+<body>
+  <video id="videoPlayer" autoplay loop muted playsinline></video>
+
+  <script>
+    const video = document.getElementById('videoPlayer');
+    const channel = new BroadcastChannel('wallpaper_channel');
+
+    // Reproduz o vídeo recebido via canal de transmissão
+    function setVideo(url) {
+      if (!url) return;
+      video.src = url;
+      video.play().catch(() => {});
+      localStorage.setItem('fw_monitor2_url', url);
+    }
+
+    channel.onmessage = (event) => {
+      if (event.data && event.data.type === 'PLAY_MONITOR_2') {
+        setVideo(event.data.url);
+      }
+    };
+
+    // Restaura último vídeo tocado neste monitor
+    const lastUrl = localStorage.getItem('fw_monitor2_url');
+    if (lastUrl) {
+      setVideo(lastUrl);
+    }
+  </script>
+</body>
+</html>

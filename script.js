@@ -1,29 +1,31 @@
 (() => {
   'use strict';
 
-  const video1 = document.getElementById('videoBackground1');
-  const video2 = document.getElementById('videoBackground2');
+  // Detecta se esta tela é Monitor 1 ou Monitor 2 via parâmetro ?monitor=2 na URL
+  const urlParams = new URLSearchParams(window.location.search);
+  const monitorId = urlParams.get('monitor') === '2' ? 2 : 1;
+
+  const video = document.getElementById('videoBackground1');
   const menu = document.getElementById('menu');
   const wallpaperGrid = document.getElementById('wallpaperGrid');
   const btnAdd = document.getElementById('btnAddVideo');
   const inputVideo = document.getElementById('videoInput');
 
-  // Lista dos vídeos locais
+  // Canal de sincronização entre janelas e monitores
+  const channel = new BroadcastChannel('wallpaper_channel');
+
   const videoFiles = [
     'video2', 'video3', 'video4', 'video5', 'video6', 'video7',
     'video8', 'video9', 'video10', 'video11', 'video12', 'video13',
     'video14', 'video15', 'video16', 'video17', 'video18'
   ];
 
-  let monitor2Window = null;
-
-  // Gerador em fila de frames reais do vídeo via Canvas (armazenado em cache IndexedDB / Memory)
+  // Cache IndexedDB para thumbnails reais dos vídeos
   const thumbCache = {};
   const queue = [];
   let isExtracting = false;
 
-  // Inicializa IndexedDB para carregar as thumbs reais instantaneamente nas próximas aberturas
-  let dbPromise = new Promise((resolve) => {
+  const dbPromise = new Promise((resolve) => {
     const request = indexedDB.open('WallpaperThumbCache', 1);
     request.onupgradeneeded = (e) => {
       const db = e.target.result;
@@ -60,7 +62,6 @@
     store.put(dataUrl, key);
   }
 
-  // Extração real sequencial (1 por 1) para não engasgar CPU/rede
   function processQueue() {
     if (isExtracting || queue.length === 0) return;
     isExtracting = true;
@@ -88,7 +89,6 @@
     }
 
     tempVideo.onloadeddata = () => {
-      // Captura no segundo 1 para evitar tela preta de fade-in
       tempVideo.currentTime = Math.min(1.0, (tempVideo.duration || 2) / 2);
     };
 
@@ -121,59 +121,37 @@
       imgEl.src = cached;
       return;
     }
-    // Coloca na fila de extração em segundo plano
     queue.push({ url: videoUrl, key, imgEl });
     processQueue();
   }
 
-  // Reprodução nos monitores
-  function playOnMonitor(videoUrl, monitor = 1) {
-    if (monitor === 1) {
-      video1.src = videoUrl;
-      video1.classList.add('active');
-      video1.play().catch(() => {});
-    } else {
-      // Monitor 2: abre ou comanda popup na segunda tela
-      if (!monitor2Window || monitor2Window.closed) {
-        const left = window.screen.width || 1920;
-        monitor2Window = window.open('', 'WallpaperMonitor2', `left=${left},top=0,width=1920,height=1080,fullscreen=yes,menubar=no,toolbar=no,location=no,status=no`);
-        if (monitor2Window) {
-          monitor2Window.document.write(`
-            <!DOCTYPE html>
-            <html>
-            <head>
-              <title>Monitor 2</title>
-              <style>
-                * { margin:0; padding:0; overflow:hidden; background:#000; }
-                video { width:100vw; height:100vh; object-fit:cover; }
-              </style>
-            </head>
-            <body>
-              <video id="v2" autoplay loop muted playsinline src="${videoUrl}"></video>
-            </body>
-            </html>
-          `);
-          monitor2Window.document.close();
-        } else {
-          // Se bloqueado popups, toca no segundo elemento interno
-          video2.src = videoUrl;
-          video2.classList.add('active');
-          video2.play().catch(() => {});
-        }
-      } else {
-        const v2 = monitor2Window.document.getElementById('v2');
-        if (v2) {
-          v2.src = videoUrl;
-          v2.play().catch(() => {});
-        }
-      }
-    }
-
-    // Oculta completamente o menu sem deixar NENHUM hub ou botão
+  // Reproduz o vídeo no monitor local
+  function playLocalVideo(url) {
+    if (!url) return;
+    video.src = url;
+    video.classList.add('active');
+    video.play().catch(() => {});
+    localStorage.setItem(`fw_monitor${monitorId}_url`, url);
     menu.classList.add('hidden');
   }
 
-  // Montagem da grid
+  // Comanda a outra tela
+  function sendToRemoteMonitor(url) {
+    const targetMonitor = monitorId === 1 ? 2 : 1;
+    channel.postMessage({
+      type: 'CHANGE_WALLPAPER',
+      target: targetMonitor,
+      url: url
+    });
+  }
+
+  // Escuta mensagens do BroadcastChannel vindas da outra tela
+  channel.onmessage = (event) => {
+    if (event.data && event.data.type === 'CHANGE_WALLPAPER' && event.data.target === monitorId) {
+      playLocalVideo(event.data.url);
+    }
+  };
+
   function buildGrid() {
     videoFiles.forEach((name) => {
       const url = `${name}.mp4`;
@@ -186,22 +164,21 @@
 
       loadRealThumbnail(url, name, img);
 
-      // Clique esquerdo: Monitor 1
+      // Clique esquerdo: aplica NESTA tela
       btn.addEventListener('click', () => {
-        playOnMonitor(url, 1);
+        playLocalVideo(url);
       });
 
-      // Clique direito: Monitor 2
+      // Clique direito: aplica na OUTRA tela
       btn.addEventListener('contextmenu', (e) => {
         e.preventDefault();
-        playOnMonitor(url, 2);
+        sendToRemoteMonitor(url);
       });
 
       wallpaperGrid.appendChild(btn);
     });
   }
 
-  // Importar vídeo local
   btnAdd.addEventListener('click', () => inputVideo.click());
   inputVideo.addEventListener('change', (e) => {
     const file = e.target.files[0];
@@ -216,18 +193,18 @@
     const customKey = `local_${file.name}_${file.size}`;
     loadRealThumbnail(url, customKey, img);
 
-    btn.addEventListener('click', () => playOnMonitor(url, 1));
+    btn.addEventListener('click', () => playLocalVideo(url));
     btn.addEventListener('contextmenu', (ev) => {
       ev.preventDefault();
-      playOnMonitor(url, 2);
+      sendToRemoteMonitor(url);
     });
 
     btnAdd.insertAdjacentElement('afterend', btn);
-    playOnMonitor(url, 1);
+    playLocalVideo(url);
     inputVideo.value = '';
   });
 
-  // Atalho: tecla ESC para alternar o menu
+  // Atalho: tecla ESC ou M alterna a grade desta tela
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' || e.key.toLowerCase() === 'm') {
       e.preventDefault();
@@ -235,6 +212,12 @@
     }
   });
 
-  // Iniciar
+  // Carrega vídeo padrão inicial ou último salvo
+  const defaultVideo = monitorId === 1 ? 'video10.mp4' : 'video4.mp4';
+  const savedVideo = localStorage.getItem(`fw_monitor${monitorId}_url`) || defaultVideo;
+  video.src = savedVideo;
+  video.classList.add('active');
+  video.play().catch(() => {});
+
   buildGrid();
 })();
