@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html>
+<head><title>Thumb Generator</title></head>
+<body>
+<div id="status">Gerando thumbnails...</div>
+<script>
+const videos = [
+  'video2', 'video3', 'video4', 'video5', 'video6', 'video7',
+  'video8', 'video9', 'video10', 'video11', 'video12', 'video13',
+  'video14', 'video15', 'video16', 'video17', 'video18'
+];
+
+async function generate() {
+  const status = document.getElementById('status');
+  for (let i = 0; i < videos.length; i++) {
+    const name = videos[i];
+    status.textContent = `Processando ${name} (${i+1}/${videos.length})...`;
+    try {
+      await new Promise((resolve) => {
+        const v = document.createElement('video');
+        v.muted = true;
+        v.playsInline = true;
+        v.preload = 'auto';
+        v.src = `http://localhost:8000/${name}.mp4`;
+
+        let timeout = setTimeout(() => {
+          v.removeAttribute('src');
+          v.load();
+          resolve();
+        }, 5000);
+
+        v.onloadedmetadata = () => {
+          v.currentTime = Math.min(1.0, (v.duration || 2) / 2);
+        };
+
+        v.onseeked = async () => {
+          clearTimeout(timeout);
+          const canvas = document.createElement('canvas');
+          canvas.width = 480;
+          canvas.height = 270;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+
+          // Salva no backend
+          await fetch(`http://localhost:8000/save_thumb?name=${name}`, {
+            method: 'POST',
+            body: dataUrl
+          }).catch(() => {});
+
+          v.removeAttribute('src');
+          v.load();
+          resolve();
+        };
+
+        v.onerror = () => {
+          clearTimeout(timeout);
+          resolve();
+        };
+      });
+    } catch (e) {
+      console.error(e);
+    }
+  }
+  status.textContent = 'Concluído com sucesso!';
+  setTimeout(() => window.close(), 1000);
+}
+
+window.onload = generate;
+</script>
+</body>
+</html>

@@ -1,7 +1,6 @@
 (() => {
   'use strict';
 
-  // Detecta se esta tela é Monitor 1 ou Monitor 2 via parâmetro ?monitor=2 na URL
   const urlParams = new URLSearchParams(window.location.search);
   const monitorId = urlParams.get('monitor') === '2' ? 2 : 1;
 
@@ -11,7 +10,6 @@
   const btnAdd = document.getElementById('btnAddVideo');
   const inputVideo = document.getElementById('videoInput');
 
-  // Canal de sincronização entre janelas e monitores
   const channel = new BroadcastChannel('wallpaper_channel');
 
   const videoFiles = [
@@ -20,13 +18,10 @@
     'video14', 'video15', 'video16', 'video17', 'video18'
   ];
 
-  // Cache IndexedDB para thumbnails reais dos vídeos
+  // 1. IndexedDB Cache Instantâneo
   const thumbCache = {};
-  const queue = [];
-  let isExtracting = false;
-
   const dbPromise = new Promise((resolve) => {
-    const request = indexedDB.open('WallpaperThumbCache', 1);
+    const request = indexedDB.open('WallpaperThumbCache_v2', 1);
     request.onupgradeneeded = (e) => {
       const db = e.target.result;
       if (!db.objectStoreNames.contains('thumbs')) {
@@ -62,70 +57,93 @@
     store.put(dataUrl, key);
   }
 
-  function processQueue() {
-    if (isExtracting || queue.length === 0) return;
-    isExtracting = true;
-    const item = queue.shift();
+  // Extração rápida em paralelo leve (pool de 3 vídeos simultâneos)
+  const extractionPool = [];
+  const MAX_CONCURRENT = 3;
+  let activeWorkers = 0;
 
-    const tempVideo = document.createElement('video');
-    tempVideo.preload = 'metadata';
-    tempVideo.muted = true;
-    tempVideo.playsInline = true;
-    tempVideo.src = item.url;
-
-    let timeout = setTimeout(() => {
-      cleanup();
-      processQueue();
-    }, 4000);
-
-    function cleanup() {
-      clearTimeout(timeout);
-      tempVideo.onloadeddata = null;
-      tempVideo.onseeked = null;
-      tempVideo.onerror = null;
-      tempVideo.removeAttribute('src');
-      tempVideo.load();
-      isExtracting = false;
+  function runExtractionPool() {
+    while (activeWorkers < MAX_CONCURRENT && extractionPool.length > 0) {
+      activeWorkers++;
+      const item = extractionPool.shift();
+      extractSingleThumbnail(item.url, item.key, item.imgEl).finally(() => {
+        activeWorkers--;
+        runExtractionPool();
+      });
     }
-
-    tempVideo.onloadeddata = () => {
-      tempVideo.currentTime = Math.min(1.0, (tempVideo.duration || 2) / 2);
-    };
-
-    tempVideo.onseeked = () => {
-      try {
-        const canvas = document.createElement('canvas');
-        canvas.width = 320;
-        canvas.height = 180;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(tempVideo, 0, 0, canvas.width, canvas.height);
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
-        saveCachedThumb(item.key, dataUrl);
-        item.imgEl.src = dataUrl;
-      } catch (e) {
-        console.warn('Erro ao gerar frame:', e);
-      }
-      cleanup();
-      processQueue();
-    };
-
-    tempVideo.onerror = () => {
-      cleanup();
-      processQueue();
-    };
   }
 
-  async function loadRealThumbnail(videoUrl, key, imgEl) {
+  function extractSingleThumbnail(videoUrl, key, imgEl) {
+    return new Promise((resolve) => {
+      const tempVideo = document.createElement('video');
+      tempVideo.muted = true;
+      tempVideo.playsInline = true;
+      tempVideo.preload = 'auto';
+      tempVideo.src = videoUrl;
+
+      let timer = setTimeout(() => {
+        cleanup();
+        resolve();
+      }, 4000);
+
+      function cleanup() {
+        clearTimeout(timer);
+        tempVideo.onloadeddata = null;
+        tempVideo.onseeked = null;
+        tempVideo.onerror = null;
+        tempVideo.removeAttribute('src');
+        tempVideo.load();
+      }
+
+      tempVideo.onloadeddata = () => {
+        tempVideo.currentTime = Math.min(1.0, (tempVideo.duration || 2) / 2);
+      };
+
+      tempVideo.onseeked = () => {
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = 320;
+          canvas.height = 180;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(tempVideo, 0, 0, canvas.width, canvas.height);
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+          saveCachedThumb(key, dataUrl);
+          imgEl.src = dataUrl;
+        } catch (e) {}
+        cleanup();
+        resolve();
+      };
+
+      tempVideo.onerror = () => {
+        cleanup();
+        resolve();
+      };
+    });
+  }
+
+  async function loadThumbnailFast(videoUrl, key, imgEl) {
+    // 1. Tenta pegar do IndexedDB (imediatamente instantâneo a partir da 1ª vez)
     const cached = await getCachedThumb(key);
     if (cached) {
       imgEl.src = cached;
       return;
     }
-    queue.push({ url: videoUrl, key, imgEl });
-    processQueue();
+
+    // 2. Tenta carregar thumbnail estática pré-existente
+    const staticUrl = `thumbs/${key}.jpg`;
+    const testImg = new Image();
+    testImg.onload = () => {
+      imgEl.src = staticUrl;
+      saveCachedThumb(key, staticUrl);
+    };
+    testImg.onerror = () => {
+      // 3. Adiciona ao pool de extração paralela
+      extractionPool.push({ url: videoUrl, key, imgEl });
+      runExtractionPool();
+    };
+    testImg.src = staticUrl;
   }
 
-  // Reproduz o vídeo no monitor local
   function playLocalVideo(url) {
     if (!url) return;
     video.src = url;
@@ -135,7 +153,6 @@
     menu.classList.add('hidden');
   }
 
-  // Comanda a outra tela
   function sendToRemoteMonitor(url) {
     const targetMonitor = monitorId === 1 ? 2 : 1;
     channel.postMessage({
@@ -145,7 +162,6 @@
     });
   }
 
-  // Escuta mensagens do BroadcastChannel vindas da outra tela
   channel.onmessage = (event) => {
     if (event.data && event.data.type === 'CHANGE_WALLPAPER' && event.data.target === monitorId) {
       playLocalVideo(event.data.url);
@@ -162,14 +178,12 @@
       img.alt = '';
       btn.appendChild(img);
 
-      loadRealThumbnail(url, name, img);
+      loadThumbnailFast(url, name, img);
 
-      // Clique esquerdo: aplica NESTA tela
       btn.addEventListener('click', () => {
         playLocalVideo(url);
       });
 
-      // Clique direito: aplica na OUTRA tela
       btn.addEventListener('contextmenu', (e) => {
         e.preventDefault();
         sendToRemoteMonitor(url);
@@ -191,7 +205,7 @@
     btn.appendChild(img);
 
     const customKey = `local_${file.name}_${file.size}`;
-    loadRealThumbnail(url, customKey, img);
+    loadThumbnailFast(url, customKey, img);
 
     btn.addEventListener('click', () => playLocalVideo(url));
     btn.addEventListener('contextmenu', (ev) => {
@@ -204,7 +218,6 @@
     inputVideo.value = '';
   });
 
-  // Atalho: tecla ESC ou M alterna a grade desta tela
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' || e.key.toLowerCase() === 'm') {
       e.preventDefault();
@@ -212,7 +225,6 @@
     }
   });
 
-  // Carrega vídeo padrão inicial ou último salvo
   const defaultVideo = monitorId === 1 ? 'video10.mp4' : 'video4.mp4';
   const savedVideo = localStorage.getItem(`fw_monitor${monitorId}_url`) || defaultVideo;
   video.src = savedVideo;

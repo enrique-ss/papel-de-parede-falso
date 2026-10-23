@@ -1,10 +1,15 @@
-# Servidor HTTP otimizado em PowerShell com suporte a Range Requests (streaming de video)
+# Servidor HTTP otimizado em PowerShell com suporte a Range Requests e gravacao de Thumbnails
 [CmdletBinding()]
 param(
     [int]$Port = 8000
 )
 
 $baseDir = $PSScriptRoot
+$thumbsDir = Join-Path $baseDir "thumbs"
+if (-not (Test-Path $thumbsDir)) {
+    New-Item -ItemType Directory -Path $thumbsDir | Out-Null
+}
+
 $listener = New-Object System.Net.HttpListener
 $listener.Prefixes.Add("http://127.0.0.1:$Port/")
 $listener.Prefixes.Add("http://localhost:$Port/")
@@ -42,6 +47,26 @@ try {
 
         try {
             $urlPath = [System.Uri]::UnescapeDataString($request.Url.LocalPath)
+
+            # Rota especial para salvar thumbnails geradas
+            if ($request.HttpMethod -eq "POST" -and $urlPath -eq "/save_thumb") {
+                $name = $request.QueryString["name"]
+                if ($name -match '^[a-zA-Z0-9_-]+$') {
+                    $reader = New-Object System.IO.StreamReader($request.InputStream, [System.Text.Encoding]::UTF8)
+                    $body = $reader.ReadToEnd()
+                    if ($body.StartsWith("data:image/jpeg;base64,")) {
+                        $base64 = $body.Substring("data:image/jpeg;base64,".Length)
+                        $bytes = [System.Convert]::FromBase64String($base64)
+                        $destFile = Join-Path $thumbsDir "$name.jpg"
+                        [System.IO.File]::WriteAllBytes($destFile, $bytes)
+                    }
+                }
+                $response.Headers.Add("Access-Control-Allow-Origin", "*")
+                $response.StatusCode = 200
+                $response.Close()
+                continue
+            }
+
             if ($urlPath -eq "/" -or [string]::IsNullOrWhiteSpace($urlPath)) {
                 $urlPath = "/index.html"
             }
@@ -60,7 +85,7 @@ try {
             }
 
             $response.Headers.Add("Access-Control-Allow-Origin", "*")
-            $response.Headers.Add("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+            $response.Headers.Add("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS")
             $response.Headers.Add("Access-Control-Allow-Headers", "Range, Content-Type")
             $response.Headers.Add("Accept-Ranges", "bytes")
 
